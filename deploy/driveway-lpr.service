@@ -1,0 +1,21 @@
+# systemd unit for running without Docker.
+#   sudo cp deploy/driveway-lpr.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now driveway-lpr
+#   journalctl -u driveway-lpr -f
+[Unit]
+Description=Nummerpladegenkendelse - indkørsel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lpr
+WorkingDirectory=/opt/driveway-lpr
+ExecStart=/opt/driveway-lpr/.venv/bin/python -m driveway_lpr -c /opt/driveway-lpr/config.yaml run
+Restart=always
+RestartSec=10
+# Optional: keep the camera password out of config.yaml
+# EnvironmentFile=/opt/driveway-lpr/.env
+
+[Install]
+WantedBy=multi-user.target

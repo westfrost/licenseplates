@@ -1,0 +1,63 @@
+# Kopiér til config.yaml og tilpas. Alle værdier har fornuftige standarder,
+# så du kan slette alt det, du ikke har brug for at ændre.
+# Enhver værdi kan også sættes som miljøvariabel: LPR_<SEKTION>__<NØGLE>,
+# fx LPR_CAMERA__SOURCE=rtsp://...  (praktisk til at holde kodeord ude af filen).
+
+timezone: Europe/Copenhagen
+
+camera:
+  # RTSP-adressen på dit kamera. Brug "sub-stream" hvis main-stream er 4K og
+  # pladerne alligevel fylder rigeligt - det sparer CPU.
+  #   Reolink:          rtsp://admin:KODE@192.168.1.50:554/h264Preview_01_main
+  #   Dahua/Amcrest:    rtsp://admin:KODE@192.168.1.50:554/cam/realmonitor?channel=1&subtype=0
+  #   Hikvision:        rtsp://admin:KODE@192.168.1.50:554/Streaming/Channels/101
+  #   USB-webcam:       "0"
+  #   Videofil (test):  /sti/til/optagelse.mp4
+  source: "rtsp://admin:KODE@192.168.1.50:554/cam/realmonitor?channel=1&subtype=0"
+  rtsp_tcp: true
+
+detection:
+  # Analyseområde [x1, y1, x2, y2] som brøkdele af billedet (0-1).
+  # Beskær til indkørslen - så bliver pladerne relativt større og vejen ignoreres.
+  roi: [0.0, 0.0, 1.0, 1.0]
+  # yolo-v9-t-384 er hurtig. Prøv yolo-v9-t-512/640 hvis pladerne er små i billedet.
+  detector_model: yolo-v9-t-384-license-plate-end2end
+  ocr_model: cct-xs-v2-global-model
+  detector_conf: 0.4
+  min_ocr_conf: 0.5
+  process_fps: 5           # analyser pr. sekund når noget bevæger sig
+  idle_check_s: 10         # kig alligevel hvert 10. sekund (holder parkerede biler "i live")
+  motion_threshold: 0.004  # andel af pixels der skal ændre sig for at tælle som bevægelse
+
+direction:
+  # "size":   pladen bliver større = bilen kører mod kameraet.
+  # "vector": bevægelse i billedet langs in_vector = ind.
+  method: size
+  approaching_is_in: true  # true: kameraet sidder ved huset og kigger ud mod vejen
+  in_vector: [0, 1]        # kun for method: vector. [0, 1] = nedad i billedet er "ind"
+  min_size_change: 0.15
+  min_move: 0.05
+  parked_after_s: 20       # stillestående så længe = parkeret
+
+tracking:
+  lost_after_s: 4
+  parked_lost_after_s: 180
+  min_reads: 2             # antal aflæsninger før en bil gemmes (filtrerer fejllæsninger)
+  dedupe_s: 90
+
+storage:
+  data_dir: data
+  snapshot_retention_days: 90   # slet billeder efter 90 dage (hændelser beholdes). 0 = aldrig
+  save_snapshots: true
+
+web:
+  host: 0.0.0.0
+  port: 8080
+  # Sæt brugernavn og kode hvis dashboardet kan nås fra andre end dig selv.
+  username: ""
+  password: ""
+
+notify:
+  # Fx Home Assistant: http://homeassistant.local:8123/api/webhook/indkoersel
+  webhook_url: ""
+  only_unknown: false

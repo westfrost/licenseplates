@@ -1,0 +1,14 @@
+services:
+  driveway-lpr:
+    build: .
+    container_name: driveway-lpr
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+    environment:
+      - TZ=Europe/Copenhagen
+      # Keep the camera password out of config.yaml if you prefer:
+      # - LPR_CAMERA__SOURCE=rtsp://admin:KODE@192.168.1.50:554/cam/realmonitor?channel=1&subtype=0
