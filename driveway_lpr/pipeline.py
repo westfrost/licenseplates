@@ -19,6 +19,7 @@ from .motion import MotionDetector
 from .notifier import WebhookNotifier
 from .plates import PlateRules, format_plate
 from .recognizer import PlateDetection, Recognizer, build_recognizer
+from .register import RegisterService, build_register
 from .storage import Storage
 from .tracker import EventData, Tracker
 
@@ -37,6 +38,10 @@ class EventWriter:
         self.snap_dir = cfg.snapshot_path
         self.tz = ZoneInfo(cfg.timezone)
         self.on_event: list[Any] = []  # callbacks, e.g. to wake up the dashboard
+        self.register: RegisterService | None = None
+        # Events whose notification waits for the register lookup (vehicle info, corrected plate).
+        self._notify_after_lookup: set[int] = set()
+        self._notify_lock = threading.Lock()
 
     def _save_images(self, data: EventData) -> tuple[str | None, str | None]:
         if not self.cfg.storage.save_snapshots or data.frame is None or data.bbox is None:
@@ -77,13 +82,39 @@ class EventWriter:
             parked=data.parked, confidence=data.confidence, reads=data.reads, alternatives=data.alternatives,
             valid_format=data.valid_format, region=data.region, snapshot=snapshot, crop=crop,
         )
-        self._notify(event_id)
+        if self.register is not None:
+            self._notify_after_lookup.add(event_id)
+            self.register.submit(event_id)
+            # Don't hold the notification back for long if the register is slow or out of quota.
+            timer = threading.Timer(30, self.on_register_done, [event_id])
+            timer.daemon = True
+            timer.start()
+        else:
+            self._notify(event_id)
         for cb in self.on_event:
             cb(event_id)
         return event_id
 
     def update_event(self, event_id: int, **fields: Any) -> None:
+        if "plate" in fields:
+            ev = self.storage.get_event(event_id)
+            if ev is not None and (ev["corrected"] or ev["register_status"] == "corrected"):
+                # Fixed by hand or via the register: the tracker's own vote must not undo that.
+                fields.pop("plate")
+                fields.pop("valid_format", None)
+            elif ev is not None and fields["plate"] != ev["plate"] and self.register is not None:
+                fields["register_status"] = None
+                self.storage.update_event(event_id, **fields)
+                self.register.submit(event_id)
+                return
         self.storage.update_event(event_id, **fields)
+
+    def on_register_done(self, event_id: int) -> None:
+        with self._notify_lock:
+            if event_id not in self._notify_after_lookup:
+                return
+            self._notify_after_lookup.discard(event_id)
+        self._notify(event_id)
 
     def mark_departed(self, event_id: int, ts: float) -> None:
         self.storage.mark_departed(event_id, ts)
@@ -102,7 +133,10 @@ class EventWriter:
                   or bool(vehicle and (vehicle["notify"] or vehicle["category"] == "blokeret")))
         if not wanted:
             return
-        name = vehicle["label"] if vehicle and vehicle["label"] else ("Ukendt bil" if vehicle is None else ev["plate"])
+        desc = (ev["register"] or {}).get("description")
+        name = vehicle["label"] if vehicle and vehicle["label"] else (desc or "Ukendt bil")
+        if ev["register_status"] == "not_found":
+            name += " (findes ikke i Motorregistret - fejllæsning?)"
         direction = DIRECTION_DA.get(ev["direction"], ev["direction"])
         title = f"{format_plate(ev['plate'])} - {direction}" + (" (parkeret)" if ev["parked"] else "")
         self.notifier.send({
@@ -121,6 +155,9 @@ class EventWriter:
             "confidence": ev["confidence"],
             "time": datetime.fromtimestamp(ev["first_seen"], self.tz).isoformat(),
             "snapshot": f"/snapshots/{ev['snapshot']}" if ev["snapshot"] else None,
+            "vehicle": (ev["register"] or {}).get("description"),
+            "register_status": ev["register_status"],
+            "read_as": ev["original_plate"],
         })
 
 
@@ -133,6 +170,8 @@ class Pipeline:
         self.writer = EventWriter(cfg, storage, notifier)
         self.rules = PlateRules(cfg.detection.plate_patterns, cfg.detection.correction_templates)
         self.tracker = Tracker(self.writer, self.rules, cfg.direction, cfg.tracking, cfg.detection.min_ocr_conf)
+        self.register = build_register(cfg.lookup, storage, self.rules, on_done=self.writer.on_register_done)
+        self.writer.register = self.register
         self.motion = MotionDetector(cfg.detection.roi, cfg.detection.motion_threshold)
         self._recognizer = recognizer
         self.camera = camera or Camera(cfg.camera.source, cfg.camera.rtsp_tcp, cfg.camera.realtime,
@@ -206,11 +245,14 @@ class Pipeline:
             "tracks": self._overlay,
             "uptime_s": round(time.time() - self.started),
             "roi": self.cfg.detection.roi,
+            "lookup_error": self.register.last_error if self.register else "",
         }
 
     def run(self, stop: threading.Event) -> None:
         if self._recognizer is None:
             self._recognizer = build_recognizer(self.cfg)
+        if self.register is not None:
+            self.register.start()
         self.camera.start()
         seq, last_proc, last_motion_check, last_live, last_cleanup = -1, 0.0, 0.0, 0.0, 0.0
         proc_times: list[float] = []

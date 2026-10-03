@@ -55,7 +55,25 @@
   const isDanish = (p) => /^[A-Z]{2}\d{5}$/.test(p || "");
   const plateHtml = (ev) => `<span class="plate${ev.valid_format === false ? " invalid" : ""}${isDanish(ev.plate) ? "" : " foreign"}" data-plate="${esc(ev.plate)}" title="Vis historik"><span>${esc(ev.plate_display || ev.plate)}</span></span>`;
   const dirHtml = (d, parked) => `<span class="dir ${esc(d)}">${esc(DIR_LABEL[d] || d)}</span>${parked ? '<span class="badge">parkeret</span>' : ""}`;
-  const whoHtml = (ev) => ev.vehicle_label ? esc(ev.vehicle_label) : (ev.known || ev.vehicle_category ? "" : '<span class="muted">Ukendt</span>');
+  const vehDesc = (ev) => (ev.register && ev.register.description) || "";
+  const whoHtml = (ev) => ev.vehicle_label ? esc(ev.vehicle_label)
+    : vehDesc(ev) ? `<span class="veh">${esc(vehDesc(ev))}</span>`
+    : (ev.known || ev.vehicle_category ? "" : '<span class="muted">Ukendt</span>');
+  const regBadge = (ev) => ev.register_status === "not_found"
+    ? '<span class="badge warn" title="Pladen findes ikke i Motorregistret – måske en fejllæsning eller en udenlandsk plade">⚠ ikke i registret</span>'
+    : ev.register_status === "corrected"
+      ? `<span class="badge" title="Kameraet læste ${esc(ev.original_plate)}, som ikke findes. Rettet via Motorregistret.">✓ rettet fra ${esc(ev.original_plate)}</span>`
+      : "";
+  let LOOKUP = { provider: "none", link: "" };
+  const extLink = (plate) => (LOOKUP.link ? LOOKUP.link.replaceAll("{plate}", encodeURIComponent(plate)) : "https://www.nummerplade.net/");
+  function extButton(plate) {
+    return `<a class="btn ghost" href="${esc(extLink(plate))}" target="_blank" rel="noopener noreferrer" data-copy="${esc(plate)}"
+      title="${LOOKUP.link ? "Åbn opslag" : "Kopierer pladen, så du kan indsætte den i søgefeltet"}">nummerplade.net ↗</a>`;
+  }
+  const REG_FIELDS = [["Mærke / model", (r) => [r.make, r.model, r.variant].filter(Boolean).join(" ")], ["Farve", (r) => r.color],
+    ["Modelår", (r) => r.model_year], ["Drivmiddel", (r) => r.fuel], ["Art", (r) => r.kind], ["Anvendelse", (r) => r.use],
+    ["Status", (r) => r.status], ["1. registrering", (r) => r.first_registration]];
+  const regRows = (r) => REG_FIELDS.map(([k, f]) => [k, f(r)]).filter(([, v]) => v).map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("");
   const snapUrl = (rel) => (rel ? `/snapshots/${rel.split("/").map(encodeURIComponent).join("/")}` : "");
 
   // ------------------------------------------------------------- tooltip
@@ -202,10 +220,17 @@
   }
 
   async function loadOverview() {
-    const [s, daily, hourly, heat, top] = await Promise.all([
+    const [s, daily, hourly, heat, top, makes] = await Promise.all([
       api("/api/summary"), api(`/api/stats/daily?days=${dailyDays}`), api("/api/stats/hourly?days=30"),
-      api("/api/stats/heatmap?days=90"), api("/api/stats/top?days=30&limit=10"),
+      api("/api/stats/heatmap?days=90"), api("/api/stats/top?days=30&limit=10"), api("/api/stats/makes?days=90"),
     ]);
+    const maxMake = Math.max(1, ...makes.map((m) => m.cars));
+    $("#makes").innerHTML = makes.length ? makes.map((m) => `
+      <div class="hbar" title="${esc(m.make)}: ${nf.format(m.cars)} forskellige biler">
+        <span class="hbar-label">${esc(m.make)}</span>
+        <span class="hbar-track"><i style="width:${(m.cars / maxMake) * 100}%"></i></span>
+        <span class="hbar-val">${nf.format(m.cars)}</span></div>`).join("")
+      : `<div class="empty">${LOOKUP.provider === "none" ? "Slå opslag i Motorregistret til (<code>lookup.provider</code>) for at se bilmærker" : "Ingen data endnu"}</div>`;
     const t = s.today;
     $("#tiles").innerHTML =
       tile("Hændelser i dag", nf.format(t.events), deltaHtml(t.events, s.yesterday.events, "i går"), true) +
@@ -226,7 +251,7 @@
     $("#latest").innerHTML = latest.events.length ? latest.events.map(eventLi).join("") : '<li class="empty">Ingen hændelser endnu</li>';
 
     $("#top-table tbody").innerHTML = top.length ? top.map((r) => `
-      <tr data-plate="${esc(r.plate)}"><td>${plateHtml(r)}</td><td>${r.label ? esc(r.label) : '<span class="muted">–</span>'}</td>
+      <tr data-plate="${esc(r.plate)}"><td>${plateHtml(r)}</td><td>${r.label ? esc(r.label) : r.description ? `<span class="veh">${esc(r.description)}</span>` : '<span class="muted">–</span>'}</td>
       <td class="num">${nf.format(r.visits)}</td><td class="num">${nf.format(r.arrivals)}</td>
       <td class="num">${fmtDuration(r.avg_dwell_s)}</td><td class="when">${fmtWhen(r.last_seen)}</td></tr>`).join("")
       : '<tr><td colspan="6" class="empty">Ingen data endnu</td></tr>';
@@ -246,7 +271,7 @@
     return `<li data-event="${ev.id}">
       ${ev.crop ? `<img class="thumb" src="${snapUrl(ev.crop)}" alt="" loading="lazy">` : '<span class="thumb"></span>'}
       ${plateHtml(ev)}
-      <span class="who">${dirHtml(ev.direction, ev.parked)} ${ev.vehicle_label ? "· " + esc(ev.vehicle_label) : ""}</span>
+      <span class="who">${dirHtml(ev.direction, ev.parked)} ${ev.vehicle_label ? "· " + esc(ev.vehicle_label) : vehDesc(ev) ? `· <span class="veh">${esc(vehDesc(ev))}</span>` : ""}${regBadge(ev)}</span>
       <span class="when">${fmtWhen(ev.first_seen)}</span></li>`;
   }
 
@@ -267,7 +292,7 @@
       <tr data-event="${ev.id}">
         <td>${ev.crop ? `<img class="thumb" src="${snapUrl(ev.crop)}" alt="" loading="lazy">` : ""}</td>
         <td class="when">${fmtWhen(ev.first_seen)}</td><td>${plateHtml(ev)}</td><td>${dirHtml(ev.direction, ev.parked)}</td>
-        <td>${whoHtml(ev)}</td><td class="num">${fmtDuration(ev.dwell_s)}</td><td class="num">${Math.round(ev.confidence * 100)} %</td>
+        <td>${whoHtml(ev)}${regBadge(ev)}</td><td class="num">${fmtDuration(ev.dwell_s)}</td><td class="num">${Math.round(ev.confidence * 100)} %</td>
       </tr>`).join("") : '<tr><td colspan="7" class="empty">Ingen hændelser matcher</td></tr>';
     const end = Math.min(evOffset + PAGE, data.total);
     $("#page-info").textContent = data.total ? `${nf.format(evOffset + 1)}–${nf.format(end)} af ${nf.format(data.total)}` : "";
@@ -319,7 +344,10 @@
              ${ev.crop ? `<img class="crop" src="${snapUrl(ev.crop)}" alt="Nummerplade">` : ""}</div>
         <div>
           <dl class="kv">
-            <dt>Navn</dt><dd>${whoHtml(ev) || "–"}</dd>
+            <dt>Navn</dt><dd>${ev.vehicle_label ? esc(ev.vehicle_label) : '<span class="muted">Ukendt</span>'}</dd>
+            ${ev.register ? regRows(ev.register) : ""}
+            ${ev.register_status === "not_found" ? `<dt>Register</dt><dd>${regBadge(ev)}</dd>` : ""}
+            ${ev.original_plate ? `<dt>Aflæst som</dt><dd>${esc(ev.original_plate)} (rettet via Motorregistret)</dd>` : ""}
             <dt>Først set</dt><dd>${fmtDateTime(ev.first_seen)}</dd>
             <dt>Sidst set</dt><dd>${fmtDateTime(ev.last_seen)}</dd>
             ${ev.dwell_s != null ? `<dt>Ophold</dt><dd>${fmtDuration(ev.dwell_s)}${ev.departed_at ? "" : " (stadig her?)"}</dd>` : ""}
@@ -335,6 +363,7 @@
             <div class="row"><button class="btn" type="submit">Gem</button>
               <button class="btn ghost" type="button" id="as-vehicle">${ev.vehicle_category ? "Redigér køretøj" : "Tilføj som kendt"}</button>
               <button class="btn danger" type="button" id="del-event">Slet</button></div>
+            <div class="row">${extButton(ev.plate)}</div>
           </form>
         </div>
       </div>`;
@@ -361,7 +390,7 @@
     chartData.profile = p;
     const v = p.vehicle;
     $("#modal-body").innerHTML = `
-      <div class="modal-title">${plateHtml(p)} <strong>${v && v.label ? esc(v.label) : "Ukendt køretøj"}</strong>
+      <div class="modal-title">${plateHtml(p)} <strong>${v && v.label ? esc(v.label) : p.register && p.register.description ? esc(p.register.description) : "Ukendt køretøj"}</strong>
         ${v ? `<span class="badge">${esc(CATEGORY[v.category] || v.category)}</span>` : ""}</div>
       <dl class="kv">
         <dt>Besøg i alt</dt><dd>${nf.format(p.visits)}</dd>
@@ -370,6 +399,11 @@
         <dt>Typisk ankomst</dt><dd>${p.avg_arrival ? `kl. ${p.avg_arrival}` : "–"}</dd>
         <dt>Gns. ophold</dt><dd>${fmtDuration(p.avg_dwell_s)}</dd>
       </dl>
+      <h3>Motorregistret</h3>
+      <dl class="kv" id="reg-info">${regInfoHtml(p.register)}</dl>
+      <div class="row" style="margin-top:10px">
+        ${LOOKUP.provider !== "none" ? '<button class="btn ghost" id="reg-refresh">Slå op nu</button>' : ""}
+        ${extButton(p.plate)}<span class="muted" id="reg-msg"></span></div>
       <div class="mini-charts">
         <div><h3>Pr. time</h3><div class="chart-box"><canvas id="p-hours"></canvas></div></div>
         <div><h3>Pr. ugedag</h3><div class="chart-box"><canvas id="p-days"></canvas></div></div>
@@ -378,6 +412,20 @@
       <ul class="event-list">${p.events.map(eventLi).join("")}</ul>`;
     if (!modal.open) modal.showModal();
     drawProfile(p);
+    $("#reg-refresh")?.addEventListener("click", async (e) => {
+      e.target.disabled = true; $("#reg-msg").textContent = "Slår op …";
+      try {
+        const info = await api(`/api/plates/${encodeURIComponent(p.plate)}/lookup`, { method: "POST" });
+        $("#reg-info").innerHTML = regInfoHtml(info.found ? { ...info, fetched_at: Date.now() / 1000 } : { found: false, fetched_at: Date.now() / 1000 });
+        $("#reg-msg").textContent = "";
+      } catch (err) { $("#reg-msg").textContent = err.message; }
+      e.target.disabled = false;
+    });
+  }
+  function regInfoHtml(r) {
+    if (!r) return `<dt>Status</dt><dd class="muted">${LOOKUP.provider === "none" ? "Opslag er ikke slået til" : "Ikke slået op endnu"}</dd>`;
+    if (!r.found) return `<dt>Status</dt><dd>⚠ Findes ikke i registret (tjekket ${fmtDateTime(r.fetched_at)})</dd>`;
+    return regRows(r) + `<dt>Tjekket</dt><dd class="muted">${fmtDateTime(r.fetched_at)}</dd>`;
   }
   function drawProfile(p) {
     if (!document.getElementById("p-hours")) return;
@@ -398,6 +446,8 @@
   modal.addEventListener("close", () => { chartData.profile = null; });
 
   document.addEventListener("click", (e) => {
+    const copy = e.target.closest("[data-copy]");
+    if (copy) { try { navigator.clipboard?.writeText(copy.dataset.copy); } catch (_) { /* ignore */ } return; }
     const plate = e.target.closest(".plate[data-plate]");
     if (plate) { e.stopPropagation(); return openPlate(plate.dataset.plate); }
     const ev = e.target.closest("[data-event]");
@@ -421,6 +471,7 @@
   async function loadStatus() {
     const s = await api("/api/status");
     TZ = s.timezone || TZ;
+    LOOKUP = { provider: s.lookup_provider || "none", link: s.lookup_link || "" };
     const pill = $("#cam-status");
     if (!s.pipeline) { pill.className = "pill"; pill.lastElementChild.textContent = "Kun dashboard"; }
     else if (s.camera_connected) { pill.className = "pill ok"; pill.lastElementChild.textContent = `Kamera online · ${s.camera_fps} fps`; }
@@ -437,6 +488,7 @@
       ["Kørt i", fmtDuration(s.uptime_s)],
       ...(s.camera_error ? [["Fejl", esc(s.camera_error)]] : []),
       ...(s.error ? [["Genkendelsesfejl", esc(s.error)]] : []),
+      ["Motorregister", s.lookup_provider === "none" ? "fra" : esc(s.lookup_provider) + (s.lookup_error ? ` – fejl: ${esc(s.lookup_error)}` : "")],
     ] : [["Status", "Kameradelen kører ikke i denne proces"]];
     $("#status-list").innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
     $("#tracks").innerHTML = (s.tracks || []).length ? s.tracks.map((t) => `

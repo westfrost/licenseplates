@@ -128,6 +128,15 @@ main { max-width: 1280px; margin: 0 auto; padding: 20px 24px 60px; }
 .dir.in::before { background: var(--dir-in); }
 .dir.out::before { background: var(--dir-out); }
 .dir.through::before { background: var(--dir-through); }
+.veh { color: var(--ink-2); }
+.badge.warn { background: color-mix(in srgb, #fab219 22%, transparent); color: var(--ink); }
+.hbars { display: flex; flex-direction: column; gap: 8px; }
+.hbar { display: grid; grid-template-columns: minmax(70px, 120px) 1fr auto; align-items: center; gap: 10px; font-size: 14px; }
+.hbar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+.hbar-track { height: 14px; }
+.hbar-track i { display: block; height: 100%; min-width: 2px; background: var(--dir-in); border-radius: 0 4px 4px 0; }
+.hbar-val { font-variant-numeric: tabular-nums; color: var(--ink); min-width: 2ch; text-align: right; }
+code { font-size: 12px; background: var(--surface-2); padding: 1px 4px; border-radius: 4px; }
 .badge { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--surface-2); color: var(--ink-2); margin-left: 6px; }
 
 .event-list { list-style: none; margin: 0; padding: 0; }

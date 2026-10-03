@@ -4,6 +4,7 @@
     python -m driveway_lpr web   -c config.yaml        # dashboard only
     python -m driveway_lpr image foto.jpg [-c ...]     # test recognition on a still image
     python -m driveway_lpr demo  -c config.yaml        # fill the database with fake data
+    python -m driveway_lpr lookup AB12345              # test the motor register lookup
 """
 
 from __future__ import annotations
@@ -23,12 +24,12 @@ from .storage import Storage
 log = logging.getLogger("driveway_lpr")
 
 
-def _serve(cfg: Config, storage: Storage, pipeline=None) -> None:
+def _serve(cfg: Config, storage: Storage, pipeline=None, register=None) -> None:
     import uvicorn
 
     from .web.app import create_app
 
-    app = create_app(cfg, storage, pipeline)
+    app = create_app(cfg, storage, pipeline, register)
     log.info("Dashboard: http://%s:%d", "localhost" if cfg.web.host == "0.0.0.0" else cfg.web.host, cfg.web.port)
     uvicorn.run(app, host=cfg.web.host, port=cfg.web.port, log_level="warning")
 
@@ -62,8 +63,58 @@ def cmd_run(cfg: Config, args: argparse.Namespace) -> None:
         storage.close()
 
 
+def _register(cfg: Config, storage: Storage):
+    from .plates import PlateRules
+    from .register import build_register
+
+    rules = PlateRules(cfg.detection.plate_patterns, cfg.detection.correction_templates)
+    return build_register(cfg.lookup, storage, rules)
+
+
 def cmd_web(cfg: Config, args: argparse.Namespace) -> None:
-    _serve(cfg, Storage(cfg.db_path, cfg.timezone))
+    storage = Storage(cfg.db_path, cfg.timezone)
+    register = _register(cfg, storage)
+    if register is not None:
+        register.start()
+    _serve(cfg, storage, register=register)
+
+
+def cmd_lookup(cfg: Config, args: argparse.Namespace) -> None:
+    """Test the register lookup, or check older events that were never looked up."""
+    from .plates import format_plate, normalize
+    from .register import RegisterError
+
+    storage = Storage(cfg.db_path, cfg.timezone)
+    register = _register(cfg, storage)
+    if register is None:
+        print("Sæt lookup.provider i config.yaml (motorregister eller motorapi) først.")
+        return
+    for plate in args.plates:
+        try:
+            info = register.lookup(normalize(plate), force=True)
+        except RegisterError as exc:
+            print(f"{format_plate(normalize(plate))}: FEJL - {exc}")
+            continue
+        if not info.found:
+            print(f"{format_plate(info.plate)}: findes ikke i registret")
+            continue
+        print(f"{format_plate(info.plate)}: {info.description()}")
+        for key in ("kind", "use", "fuel", "status", "first_registration"):
+            if getattr(info, key):
+                print(f"  {key:20s} {getattr(info, key)}")
+        if args.raw:
+            for key, value in info.raw.items():
+                print(f"  - {key}: {value}")
+    if args.backfill_days:
+        ids = storage.events_without_register(time.time() - args.backfill_days * 86400)
+        print(f"Slår {len(ids)} hændelser op (maks. {cfg.lookup.max_per_hour} opslag i timen) ...")
+        for event_id in ids:
+            try:
+                status = register.process_event(event_id)
+            except RegisterError as exc:
+                print(f"  hændelse {event_id}: {exc} - stopper")
+                break
+            print(f"  hændelse {event_id}: {status}")
 
 
 def cmd_image(cfg: Config, args: argparse.Namespace) -> None:
@@ -147,6 +198,23 @@ def cmd_demo(cfg: Config, args: argparse.Namespace) -> None:
             else:
                 storage.add_event(plate=plate(), first_seen=t, last_seen=t + 4, direction="through",
                                   confidence=rng.uniform(0.6, 0.95), reads=rng.randint(2, 6))
+    # Fake motor register data, so the dashboard shows makes and models.
+    cars = [("Toyota", "Yaris", "Hvid"), ("Volkswagen", "Golf", "Grå"), ("Skoda", "Octavia", "Sort"),
+            ("Tesla", "Model Y", "Hvid"), ("Peugeot", "208", "Blå"), ("Kia", "Niro", "Sølv"),
+            ("Volvo", "XC60", "Sort"), ("Ford", "Transit Custom", "Hvid"), ("Toyota", "Corolla", "Rød")]
+    rows, _ = storage.list_events(limit=100000)
+    plates = sorted({r["plate"] for r in rows})
+    for i, p in enumerate(plates):
+        make, model, color = cars[i % len(cars)]
+        info = {"make": make, "model": model, "color": color, "model_year": 2012 + i % 12, "source": "demo",
+                "description": f"{make} {model} · {color.lower()} · {2012 + i % 12}"}
+        storage.put_register(p, True, "demo", info)
+    for r in rows[:40]:
+        storage.update_event(r["id"], register_status="found")
+    if len(rows) > 6:
+        storage.update_event(rows[3]["id"], register_status="not_found")
+        storage.update_event(rows[5]["id"], register_status="corrected", original_plate=rows[5]["plate"][:-1] + "8")
+
     # someone is home right now
     storage.add_event(plate=residents[0][0], first_seen=now - 5400, last_seen=now, direction="in", parked=True,
                       confidence=0.97, reads=40)
@@ -165,6 +233,11 @@ def main(argv: list[str] | None = None) -> None:
     p_img = sub.add_parser("image", help="test genkendelse på billeder")
     p_img.add_argument("images", nargs="+")
     p_img.add_argument("--out", default=None, help="mappe til billeder med markeringer")
+    p_look = sub.add_parser("lookup", help="slå plader op i Motorregistret")
+    p_look.add_argument("plates", nargs="*")
+    p_look.add_argument("--raw", action="store_true", help="vis alle felter fra registret")
+    p_look.add_argument("--backfill-days", type=int, default=0,
+                        help="slå også hændelser fra de sidste N dage op, som ikke er tjekket")
     p_demo = sub.add_parser("demo", help="fyld databasen med demo-data")
     p_demo.add_argument("--days", type=int, default=60)
     args = parser.parse_args(argv)
@@ -179,7 +252,7 @@ def main(argv: list[str] | None = None) -> None:
         config_path = "config.yaml"
     cfg = load_config(config_path)
 
-    {"run": cmd_run, "web": cmd_web, "image": cmd_image, "demo": cmd_demo}[args.cmd](cfg, args)
+    {"run": cmd_run, "web": cmd_web, "image": cmd_image, "demo": cmd_demo, "lookup": cmd_lookup}[args.cmd](cfg, args)
 
 
 if __name__ == "__main__":

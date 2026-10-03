@@ -61,3 +61,20 @@ notify:
   # Fx Home Assistant: http://homeassistant.local:8123/api/webhook/indkoersel
   webhook_url: ""
   only_unknown: false
+
+lookup:
+  # Krydstjek pladen mod Motorregistret (mærke, model, farve, årgang - aldrig ejeren).
+  #   none          - slået fra
+  #   motorregister - gratis: Skats offentlige opslag på motorregister.skat.dk
+  #                   (samme kilde som nummerplade.net bygger på). 3-5 s pr. opslag.
+  #   motorapi      - motorapi.dk: rigtigt API, kræver API-nøgle, 100 gratis opslag/dag
+  provider: none
+  api_key: ""              # kun motorapi (eller LPR_LOOKUP__API_KEY=...)
+  # Hvis den aflæste plade ikke findes, prøves de næstbedste aflæsninger, og
+  # findes præcis én af dem, rettes hændelsen automatisk.
+  auto_correct: true
+  cache_days: 30           # hver plade slås højst op én gang pr. 30 dage
+  max_per_hour: 30
+  # Valgfrit direkte link i dashboardet; {plate} erstattes, fx et opslag hos nummerplade.net.
+  # Tomt = knappen åbner nummerplade.net og kopierer pladen, så du kan indsætte den.
+  link_template: ""

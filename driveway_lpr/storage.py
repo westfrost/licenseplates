@@ -37,6 +37,14 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_first_seen ON events(first_seen);
 CREATE INDEX IF NOT EXISTS idx_events_plate ON events(plate);
 
+CREATE TABLE IF NOT EXISTS register (   -- cache of motor register lookups
+    plate      TEXT PRIMARY KEY,
+    found      INTEGER NOT NULL,
+    source     TEXT NOT NULL DEFAULT '',
+    data       TEXT NOT NULL DEFAULT '{}',
+    fetched_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS vehicles (
     plate      TEXT PRIMARY KEY,
     label      TEXT NOT NULL DEFAULT '',   -- e.g. "Mors Toyota"
@@ -48,9 +56,24 @@ CREATE TABLE IF NOT EXISTS vehicles (
 );
 """
 
-EVENT_FIELDS = {"plate", "confidence", "reads", "valid_format", "region", "direction",
-                "parked", "last_seen", "departed_at", "snapshot", "crop", "corrected", "alternatives"}
+# Columns added after the first release; added to existing databases on start.
+MIGRATIONS = {
+    "events": [("register_status", "TEXT"),  # found / not_found / corrected / pending / error / skipped
+               ("original_plate", "TEXT")],  # what the camera read, if corrected via the register
+}
+
+EVENT_FIELDS = {"plate", "confidence", "reads", "valid_format", "region", "direction", "parked", "last_seen",
+                "departed_at", "snapshot", "crop", "corrected", "alternatives", "register_status", "original_plate"}
 VEHICLE_FIELDS = ("label", "owner", "category", "notes", "notify")
+
+
+def _register_summary(data: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The register fields the dashboard shows (the full raw data stays in the cache table)."""
+    if not data:
+        return None
+    keys = ("make", "model", "variant", "color", "model_year", "fuel", "kind", "use", "status",
+            "first_registration", "description", "source")
+    return {"found": True, **{k: data.get(k) for k in keys}}
 
 
 class Storage:
@@ -64,6 +87,11 @@ class Storage:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(SCHEMA)
+            for table, columns in MIGRATIONS.items():
+                existing = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+                for name, decl in columns:
+                    if name not in existing:
+                        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
             self._conn.commit()
 
     def close(self) -> None:
@@ -131,8 +159,10 @@ class Storage:
 
     @staticmethod
     def _event_select() -> str:
-        return """SELECT e.*, v.label AS vehicle_label, v.owner AS vehicle_owner, v.category AS vehicle_category
-                  FROM events e LEFT JOIN vehicles v ON v.plate = e.plate"""
+        return """SELECT e.*, v.label AS vehicle_label, v.owner AS vehicle_owner, v.category AS vehicle_category,
+                         r.found AS reg_found, r.data AS reg_data
+                  FROM events e LEFT JOIN vehicles v ON v.plate = e.plate
+                                LEFT JOIN register r ON r.plate = e.plate"""
 
     @staticmethod
     def _decorate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -143,6 +173,8 @@ class Storage:
             r["known"] = r.get("vehicle_category") is not None
             stay_end = r.get("departed_at") or (r["last_seen"] if r["parked"] else None)
             r["dwell_s"] = round(stay_end - r["first_seen"]) if stay_end else None
+            reg = json.loads(r.pop("reg_data", None) or "{}") if r.pop("reg_found", None) else None
+            r["register"] = _register_summary(reg)
         return rows
 
     def list_events(self, *, limit: int = 50, offset: int = 0, plate: str | None = None,
@@ -184,6 +216,31 @@ class Storage:
         with self._lock:
             self._conn.executemany("UPDATE events SET snapshot = NULL, crop = NULL WHERE id = ?", [(i,) for i in ids])
             self._conn.commit()
+
+    # --------------------------------------------------------------- register
+
+    def get_register(self, plate: str) -> dict[str, Any] | None:
+        rows = self._all("SELECT * FROM register WHERE plate = ?", (plate,))
+        if not rows:
+            return None
+        row = rows[0]
+        row["found"] = bool(row["found"])
+        row["data"] = json.loads(row["data"] or "{}")
+        return row
+
+    def put_register(self, plate: str, found: bool, source: str, data: dict[str, Any]) -> None:
+        self._exec(
+            """INSERT INTO register (plate, found, source, data, fetched_at) VALUES (?,?,?,?,?)
+               ON CONFLICT(plate) DO UPDATE SET found = excluded.found, source = excluded.source,
+                                                data = excluded.data, fetched_at = excluded.fetched_at""",
+            (plate, int(found), source, json.dumps(data, ensure_ascii=False, default=str), time.time()),
+        )
+
+    def events_without_register(self, since: float) -> list[int]:
+        with self._lock:
+            return [r[0] for r in self._conn.execute(
+                "SELECT id FROM events WHERE first_seen >= ? AND register_status IS NULL ORDER BY first_seen",
+                (since,)).fetchall()]
 
     # --------------------------------------------------------------- vehicles
 
@@ -313,7 +370,8 @@ class Storage:
         for r in rows:
             s = stats.setdefault(r["plate"], {"plate": r["plate"], "visits": 0, "arrivals": 0,
                                               "last_seen": 0.0, "label": r["vehicle_label"],
-                                              "category": r["vehicle_category"], "dwell": []})
+                                              "category": r["vehicle_category"], "dwell": [],
+                                              "description": (r["register"] or {}).get("description")})
             s["visits"] += 1
             s["arrivals"] += r["direction"] == "in"
             s["last_seen"] = max(s["last_seen"], r["first_seen"])
@@ -324,6 +382,13 @@ class Storage:
             dw = s.pop("dwell")
             s["avg_dwell_s"] = round(sum(dw) / len(dw)) if dw else None
         return out
+
+    def top_makes(self, days: int = 90, limit: int = 8, now: float | None = None) -> list[dict[str, Any]]:
+        """Car makes among the distinct registered cars seen in the period."""
+        plates = {r["plate"]: r["register"] for r in self._events_since(self._day_start(days - 1, now))
+                  if r["register"] and r["register"].get("make")}
+        counts = Counter(reg["make"] for reg in plates.values())
+        return [{"make": m, "cars": n} for m, n in counts.most_common(limit)]
 
     def plate_profile(self, plate: str) -> dict[str, Any]:
         rows = self._decorate(self._all(self._event_select() + " WHERE e.plate = ? ORDER BY e.first_seen",
@@ -336,9 +401,12 @@ class Storage:
             mins = sum(a.hour * 60 + a.minute for a in arrivals) / len(arrivals)
             avg_arrival = f"{int(mins // 60):02d}:{int(mins % 60):02d}"
         dwell = [r["dwell_s"] for r in rows if r["dwell_s"]]
+        reg = self.get_register(plate)
         return {
             "plate": plate,
             "vehicle": self.get_vehicle(plate),
+            "register": ({**(_register_summary(reg["data"]) or {}), "fetched_at": reg["fetched_at"]} if reg and reg["found"]
+                         else {"found": False, "fetched_at": reg["fetched_at"]} if reg else None),
             "visits": len(rows),
             "first_seen": rows[0]["first_seen"] if rows else None,
             "last_seen": rows[-1]["first_seen"] if rows else None,

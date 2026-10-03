@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from ..config import Config
 from ..plates import format_plate, normalize
+from ..register import RateLimited, RegisterError
 from ..storage import Storage
 
 HERE = Path(__file__).parent
@@ -39,7 +40,9 @@ class VehicleIn(BaseModel):
     notify: bool = False
 
 
-def create_app(cfg: Config, storage: Storage, pipeline: Any | None = None) -> FastAPI:
+def create_app(cfg: Config, storage: Storage, pipeline: Any | None = None, register: Any | None = None) -> FastAPI:
+    if register is None and pipeline is not None:
+        register = pipeline.register
     security = HTTPBasic(auto_error=False)
 
     def auth(creds: HTTPBasicCredentials | None = Depends(security)) -> None:
@@ -68,7 +71,9 @@ def create_app(cfg: Config, storage: Storage, pipeline: Any | None = None) -> Fa
 
     @app.get("/api/status")
     def status() -> dict[str, Any]:
-        base = {"pipeline": pipeline is not None, "timezone": cfg.timezone, "now": time.time()}
+        base = {"pipeline": pipeline is not None, "timezone": cfg.timezone, "now": time.time(),
+                "lookup_provider": cfg.lookup.provider if register is not None else "none",
+                "lookup_link": cfg.lookup.link_template}
         if pipeline is not None:
             base.update(pipeline.status())
         return base
@@ -108,6 +113,10 @@ def create_app(cfg: Config, storage: Storage, pipeline: Any | None = None) -> Fa
                 storage.rename_plate(ev["plate"], new)
             else:
                 storage.update_event(event_id, plate=new, corrected=True)
+            if new != ev["plate"]:
+                storage.update_event(event_id, register_status=None, original_plate=None)
+                if register is not None:
+                    register.submit(event_id)
         if body.direction:
             if body.direction not in ("in", "out", "through", "unknown"):
                 raise HTTPException(400, "Ugyldig retning")
@@ -142,6 +151,23 @@ def create_app(cfg: Config, storage: Storage, pipeline: Any | None = None) -> Fa
         for r in rows:
             r["plate_display"] = format_plate(r["plate"])
         return rows
+
+    @app.get("/api/stats/makes")
+    def makes(days: int = Query(90, ge=1, le=3650)) -> list[dict[str, Any]]:
+        return storage.top_makes(days)
+
+    @app.post("/api/plates/{plate}/lookup")
+    async def lookup_plate(plate: str) -> dict[str, Any]:
+        """Look the plate up in the motor register now (ignores the cache)."""
+        if register is None:
+            raise HTTPException(503, "Opslag i Motorregistret er ikke slået til (lookup.provider)")
+        try:
+            info = await asyncio.to_thread(register.lookup, normalize(plate), True)
+        except RateLimited as exc:
+            raise HTTPException(429, str(exc)) from exc
+        except RegisterError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        return info.to_dict()
 
     @app.get("/api/plates/{plate}")
     def plate(plate: str) -> dict[str, Any]:

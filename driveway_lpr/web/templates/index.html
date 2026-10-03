@@ -73,15 +73,23 @@
       </article>
     </div>
 
+    <div class="grid two wide-left">
     <article class="card">
       <header class="card-head">
         <div><h2>Hyppigste biler</h2><p class="sub">Sidste 30 dage</p></div>
       </header>
       <div class="table-wrap"><table class="table" id="top-table">
-        <thead><tr><th>Nummerplade</th><th>Navn</th><th class="num">Besøg</th><th class="num">Ankomster</th><th class="num">Gns. ophold</th><th>Sidst set</th></tr></thead>
+        <thead><tr><th>Nummerplade</th><th>Køretøj</th><th class="num">Besøg</th><th class="num">Ankomster</th><th class="num">Gns. ophold</th><th>Sidst set</th></tr></thead>
         <tbody></tbody>
       </table></div>
     </article>
+    <article class="card">
+      <header class="card-head">
+        <div><h2>Bilmærker</h2><p class="sub">Forskellige biler pr. mærke, sidste 90 dage</p></div>
+      </header>
+      <div id="makes" class="hbars"></div>
+    </article>
+    </div>
   </section>
 
   <!-- ============================== HÆNDELSER ============================== -->
@@ -107,7 +115,7 @@
         <a class="btn ghost" id="export-link" href="/api/export.csv">Eksportér CSV</a>
       </form>
       <div class="table-wrap"><table class="table" id="events-table">
-        <thead><tr><th></th><th>Tidspunkt</th><th>Nummerplade</th><th>Retning</th><th>Navn</th><th class="num">Ophold</th><th class="num">Sikkerhed</th></tr></thead>
+        <thead><tr><th></th><th>Tidspunkt</th><th>Nummerplade</th><th>Retning</th><th>Køretøj</th><th class="num">Ophold</th><th class="num">Sikkerhed</th></tr></thead>
         <tbody></tbody>
       </table></div>
       <div class="pager"><button class="btn ghost" id="prev">← Nyere</button><span id="page-info"></span><button class="btn ghost" id="next">Ældre →</button></div>

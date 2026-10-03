@@ -16,6 +16,7 @@ en lokal database og vises i et dashboard med statistik.
 - **Parkering:** en bil der står stille i 20 s registreres som parkeret. Når den kører igen, registreres afgangen, og opholdets længde beregnes.
 - **Dashboard:** dagens tal, "holder her nu", trafik pr. dag, tidspunkt på døgnet, varmekort over ugedag og time, hyppigste biler, historik pr. plade, live-billede med markeringer, lyst og mørkt tema, virker på mobil.
 - Giv kendte biler navn og kategori ("Familiebilen", "Mormor", "Postnord" …). Ret fejllæsninger direkte i dashboardet.
+- **Krydstjek mod Motorregistret:** mærke, model, farve og årgang vises ved hver bil. Findes en aflæst plade ikke i registret, rettes den automatisk til en af de næstbedste aflæsninger, hvis præcis én af dem findes. Ellers markeres den "⚠ ikke i registret". Se [Motorregistret](#krydstjek-mod-motorregistret).
 - CSV-eksport, JSON-API og webhook til fx Home Assistant.
 - Billeder af hver hændelse (hele billedet og nærbillede af pladen) slettes automatisk efter 90 dage.
 
@@ -97,8 +98,36 @@ kamera (RTSP) ─▶ bevægelse? ─▶ find plade + OCR ─▶ tracker ─▶ S
 | `driveway_lpr/plates.py` | Normalisering, dansk format, rettelse af forvekslinger, afstemning |
 | `driveway_lpr/tracker.py` | Følger plader mellem billeder, bestemmer retning og parkering, laver hændelser |
 | `driveway_lpr/storage.py` | SQLite (hændelser og køretøjer) og statistik |
+| `driveway_lpr/register.py` | Opslag i Motorregistret / MotorAPI, cache, automatisk rettelse |
 | `driveway_lpr/pipeline.py` | Binder delene sammen, gemmer snapshots, live-billede |
 | `driveway_lpr/web/` | FastAPI og dashboard (vanilla JS + Chart.js, intet build-trin) |
+
+## Krydstjek mod Motorregistret
+
+nummerplade.net har ikke noget offentligt API, og automatiske opslag på deres
+side (scraping) vil typisk være i strid med deres vilkår. Deres data kommer
+fra Motorregistret (DMR), og det kan programmet slå op i direkte:
+
+| `lookup.provider` | Kilde | Pris | Bemærk |
+|---|---|---|---|
+| `motorregister` | Skats offentlige opslag på motorregister.skat.dk | Gratis | Et webformular, ikke et API: 3–5 s pr. opslag, og det kan holde op med at virke, hvis Skat ændrer siden |
+| `motorapi` | [motorapi.dk](https://www.motorapi.dk) | 100 opslag/dag gratis | Rigtigt JSON-API. Kræver API-nøgle (`lookup.api_key`) |
+
+Sådan bruges opslaget:
+
+- Hver ny plade slås op én gang i baggrunden og gemmes i 30 dage. Faste biler koster altså ikke flere opslag.
+- **Automatisk rettelse:** findes den aflæste plade ikke, prøves op til 3 af de næstbedste aflæsninger fra afstemningen. Findes præcis én af dem, rettes hændelsen ("✓ rettet fra AB12346"). Findes ingen eller flere, markeres den "⚠ ikke i registret" (fejllæsning eller udenlandsk plade).
+- Notifikationen venter på opslaget, så den kan indeholde "Toyota Yaris · hvid" og den rettede plade.
+- Dashboardet viser registerdata ved hver bil og et diagram over bilmærker. Knappen *nummerplade.net ↗* kopierer pladen og åbner siden til manuelt tjek. Sæt `link_template`, hvis du vil have et direkte link.
+
+Test fra serveren:
+
+```bash
+python -m driveway_lpr lookup AB12345 --raw          # virker opslaget?
+python -m driveway_lpr lookup --backfill-days 30     # tjek ældre hændelser
+```
+
+Registret indeholder kun oplysninger om køretøjet, ikke om ejeren. Ejeroplysninger er ikke offentlige i Danmark.
 
 ## Webhook / Home Assistant
 
@@ -112,7 +141,9 @@ Sæt `notify.webhook_url`. Ved hver hændelse sendes en POST med JSON:
   "direction": "in", "direction_da": "ind", "parked": true,
   "known": true, "label": "Familiebilen", "category": "beboer",
   "confidence": 0.97, "time": "2026-10-03T16:52:11+02:00",
-  "snapshot": "/snapshots/2026/10/03/165211_AB12345_17.jpg"
+  "snapshot": "/snapshots/2026/10/03/165211_AB12345_17.jpg",
+  "vehicle": "Toyota Yaris 1,0 VVT-i · hvid · 2019",
+  "register_status": "found", "read_as": null
 }
 ```
 
@@ -143,7 +174,9 @@ Interaktiv dokumentation: `http://<server>:8080/api/docs`. De vigtigste endpoint
 | `GET /api/events?plate=&direction=&days=&known=` | Hændelser (sideinddelt) |
 | `PATCH /api/events/{id}` | Ret plade og retning (`apply_to_all` retter på alle hændelser) |
 | `GET /api/stats/daily`, `/hourly`, `/heatmap`, `/top` | Statistik |
-| `GET /api/plates/{plade}` | Profil og historik for én plade |
+| `GET /api/plates/{plade}` | Profil, registerdata og historik for én plade |
+| `POST /api/plates/{plade}/lookup` | Slå pladen op i Motorregistret nu |
+| `GET /api/stats/makes` | Bilmærker blandt de biler, der er set |
 | `GET/PUT/DELETE /api/vehicles/{plade}` | Kendte køretøjer |
 | `GET /api/export.csv` | CSV (semikolon-separeret, åbner direkte i Excel) |
 | `GET /api/live.mjpg`, `/api/live.jpg` | Live-billede med markeringer |

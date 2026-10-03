@@ -121,6 +121,31 @@ class NotifyConfig:
 
 
 @dataclass
+class LookupConfig:
+    """Cross-check plates against the Danish motor register (DMR)."""
+
+    # "none", "motorregister" (free: the official public lookup on
+    # motorregister.skat.dk, ~3-5 s per lookup) or "motorapi" (motorapi.dk,
+    # needs an API key, 100 free lookups per day).
+    provider: str = "none"
+    api_key: str = ""
+    api_url: str = "https://v1.motorapi.dk"
+    api_header: str = "X-AUTH-TOKEN"
+    timeout_s: float = 20.0
+    # Results are cached; a plate is only looked up again after this many days.
+    cache_days: int = 30
+    not_found_cache_days: int = 3
+    # If the read plate does not exist in the register, try the runner-up reads
+    # from the vote and switch to the one that does exist.
+    auto_correct: bool = True
+    max_alternatives: int = 3
+    # Politeness / quota guard across all lookups.
+    max_per_hour: int = 30
+    # Optional link shown in the dashboard, e.g. to nummerplade.net. {plate} is replaced.
+    link_template: str = ""
+
+
+@dataclass
 class Config:
     camera: CameraConfig = field(default_factory=CameraConfig)
     detection: DetectionConfig = field(default_factory=DetectionConfig)
@@ -129,6 +154,7 @@ class Config:
     storage: StorageConfig = field(default_factory=StorageConfig)
     web: WebConfig = field(default_factory=WebConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
+    lookup: LookupConfig = field(default_factory=LookupConfig)
     timezone: str = "Europe/Copenhagen"
 
     @property
